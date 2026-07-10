@@ -19,3 +19,6 @@ workspace/log_ngp.txt
 models/
 *.log
 dist
+
+# pip 临时目录（C: 盘空间不足，pip 用 D: 临时目录）
+.piptmp/
