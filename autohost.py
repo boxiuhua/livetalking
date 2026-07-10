@@ -12,6 +12,7 @@
 
 import argparse
 import glob
+import json
 import os
 import random
 import sys
@@ -26,6 +27,33 @@ except ImportError:
 
 class ConnectionLost(Exception):
     """与引擎连续多次通信失败。等待循环靠它退出，主循环靠它触发重连。"""
+
+
+# 值守正在播什么，写在这里给 llm.py 读。故事文本走 echo 不经过大模型，
+# 大模型不知道她嘴里在讲什么，被观众问到就会编。这个文件是它俩之间唯一的桥。
+NOW_PLAYING = os.path.join('runtime', 'now_playing.json')
+
+
+def write_now_playing(item):
+    """记录当前节目；item 为 None 表示什么也没在播。
+
+    故事连全文一起写：只给标题的话，大模型照样会编剧情。
+    """
+    try:
+        os.makedirs(os.path.dirname(NOW_PLAYING), exist_ok=True)
+        if item is None:
+            payload = {'kind': 'idle'}
+        else:
+            title = os.path.splitext(item['name'])[0]
+            title = title.split('-', 1)[-1]   # 去掉 "01-" 这样的排序前缀
+            payload = {'kind': item['type'], 'title': title}
+            if item['type'] == 'story':
+                paras = read_paragraphs(item['path'])
+                payload['text'] = '\n'.join(paras[1:])   # 首段是标题，去掉
+        with open(NOW_PLAYING, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[warn] 写 now_playing 失败（不影响播放）: {e}")
 
 
 # ─── 内容加载 ────────────────────────────────────────────────────────────────
@@ -169,12 +197,17 @@ class LiveTalkingClient:
             self._note_fail()
             return True
 
-    def say(self, sessionid, text):
-        """echo 模式：让数字人念一段文本。返回是否成功。"""
+    def say(self, sessionid, text, mode='echo', interrupt=False):
+        """让数字人说话。
+
+        mode='echo' 直接念 text；mode='chat' 把 text 交给大模型，念它的回答。
+        interrupt=True 会先掐掉当前正在说的内容（插话用）。
+        """
+        payload = {'sessionid': sessionid, 'type': mode, 'text': text}
+        if interrupt:
+            payload['interrupt'] = True
         try:
-            r = self._s.post(self.server + '/human',
-                             json={'sessionid': sessionid, 'type': 'echo', 'text': text},
-                             timeout=self.timeout)
+            r = self._s.post(self.server + '/human', json=payload, timeout=self.timeout)
             ok = r.json().get('code') == 0
             self._note_ok()
             return ok
@@ -239,6 +272,7 @@ def wait_for_idle(client, sessionid, gap, poll=0.5):
 # ─── 播放单条内容 ────────────────────────────────────────────────────────────
 
 def play_item(client, sessionid, item):
+    write_now_playing(item)
     if item['type'] == 'story':
         paras = read_paragraphs(item['path'])
         print(f"[讲故事] {item['name']}（{len(paras)} 段）")
@@ -251,6 +285,7 @@ def play_item(client, sessionid, item):
         print(f"[唱歌] {item['name']}")
         if client.play_audio(sessionid, item['path']):
             wait_until_spoken(client, sessionid, start_timeout=15)
+    write_now_playing(None)
 
 
 # ─── 主循环 ──────────────────────────────────────────────────────────────────
